@@ -1,5 +1,7 @@
 const puppeteer = require('puppeteer');
-(async () => {
+const voters = require('./voters.json')
+
+const main = async () => {
     const browser = await puppeteer.launch({
         headless: false,
         defaultViewport: null,
@@ -35,27 +37,144 @@ const puppeteer = require('puppeteer');
         }
     });
 
-    await page.waitForSelector('ion-button.md.button.button-large.button-solid.button-strong.ion-activatable.ion-focusable.hydrated', { visible: true, timeout: 5000 });
+    await page.waitForSelector('.logout', {
+        visible: true,
+        timeout: 5000
+    });
 
-    // Seleccionar el segundo botón con la clase específica
-    const buttons = await page.$$('ion-button.md.button.button-large.button-solid.button-strong.ion-activatable.ion-focusable.hydrated');
+    console.log('Ya inició sesión');
 
-    if (buttons.length >= 2) {
-        const secondButton = await page.evaluateHandle((button) => button, buttons[1]);
-        await secondButton.click(); // Hacer clic en el segundo botón
-    } else {
-        console.error('No se encontraron al menos dos botones con la clase específica');
-    }
+    const buttonSelector = '#main-content > div > div > div > ion-content > div > div > div.homeButtonContainer.hbc-2 > ion-button:nth-child(3)';
 
-    // Esperar a que el elemento con la clase __voters-DUI esté presente en el DOM
-    await page.waitForSelector('.__voters-DUI', { visible: true, timeout: 5000 });
+    await page.waitForSelector(buttonSelector);
+    await page.evaluate((buttonSelector) => {
+        const button = document.querySelector(buttonSelector);
+        if (button) {
+            button.click();
+        } else {
+            console.error('No se pudo encontrar el botón con el selector especificado');
+        }
+    }, buttonSelector);
 
-    // Seleccionar el input dentro del elemento con la clase __voters-DUI
+    await page.waitForSelector('.__voters-DUI', {
+        visible: true
+    });
+
     const inputInsideDUI = await page.$('.__voters-DUI input');
 
-    if (inputInsideDUI) {
-        await inputInsideDUI.type('123456789'); // Reemplaza 'Texto a escribir' con tu información
-    } else {
-        console.error('No se encontró el input dentro del elemento con la clase __voters-DUI');
+    const okSelector = '.duiLookup.ok';
+    const errorSelector = '.duiLookup.error';
+    const reasonSelector = '.duiLookup.ok .reason';
+    const reasonErrorSelector = '.duiLookup.error .reason';
+
+    let counter = 1;
+
+    console.log(`Se van a verificar ${voters.length} votantes`)
+
+    for (const voter of voters) {
+
+        let dui = voter.documento.toString().replace(/-/g, '');
+
+        dui = dui.length > 9 ? dui.substring(0, 9) : dui.padStart(9, '0');
+        console.log(counter, ' - Verificando el DUI: ', dui);
+        counter++;
+
+        if (!inputInsideDUI) {
+            console.error('No se encontró el input dentro del elemento con la clase __voters-DUI');
+            break;
+        }
+
+        await inputInsideDUI.click({
+            clickCount: 3
+        }); // Seleccionar el contenido actual del input
+
+        await inputInsideDUI.type(dui); // Ingresar el DUI
+
+        await delay(3000);
+
+        // verificar si se cargo el mensaje de error o el mensaje de ok
+        await page.waitForSelector(`${okSelector}, ${errorSelector}, ${reasonSelector}, ${reasonErrorSelector}`, {
+            visible: true
+        });
+
+        const ok = await page.$(okSelector);
+        const error = await page.$(errorSelector);
+        const reason = await page.$(reasonSelector);
+        const reasonError = await page.$(reasonErrorSelector);
+
+        if (reason || reasonError) {
+            const reasonText = await page.evaluate((selector) => {
+                const element = document.querySelector(selector);
+                if (element) {
+                    return element.textContent.trim();
+                }
+                return '';
+            }, reason ? reasonSelector : reasonErrorSelector);
+
+            if (ok) {
+                console.log('El dui es valido, pero: ', reasonText);
+            } else if (error) {
+                console.log('El dui es invalido, porque: ', reasonText);
+            } else {
+                console.error('No se pudo determinar si el DUI es valido o no');
+            }
+
+            console.log('\n')
+
+            await delay(2000);
+
+            continue;
+        }
+
+        if (ok) {
+            console.log(`Ingrensando el telefono ${voter.telefono}`);
+            await delay(1000);
+
+            const inputTelefono = await page.$('.__voters-telefono input');
+
+            if (!inputTelefono) {
+                console.error('No se pudo encontrar el input del telefono');
+                break;
+            }
+
+            await inputTelefono.click({
+                clickCount: 3
+            }); // Seleccionar el contenido actual del input
+
+            await inputTelefono.type(voter.telefono.toString());
+
+            const button = await page.$("#main-content > div.ion-page.can-go-back > div > div > ion-content > div > div > div.votersContainer > div > div.buttonContainer > ion-button")
+
+            if (!button) {
+                console.log('No se pudo encontrar el botón para guardar');
+                break
+            }
+
+            button.click();
+
+            await delay(3000);
+
+            const alert = await page.$('ion-alert');
+
+            if (alert) {
+                console.log('No se pudo agregar, hay una alerta');
+            } else {
+                console.log('Se ingresó el telefono correctamente');
+            }
+
+            console.log('\n');
+
+        } else if (error) {
+            console.log(`No se pudo ingresar el telefono ${voter.telefono} porque el DUI no es valido \n`);
+            await delay(2000);
+        } else {
+            console.log('No se encontró el mensaje de error o de ok \n');
+            await delay(2000);
+        }
     }
-})();
+};
+
+
+const delay = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
+
+main();
