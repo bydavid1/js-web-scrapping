@@ -1,5 +1,6 @@
 const puppeteer = require('puppeteer');
 const voters = require('./voters.json')
+const fs = require('fs').promises;
 
 const main = async () => {
     const browser = await puppeteer.launch({
@@ -14,7 +15,7 @@ const main = async () => {
 
     const inputDUI = await page.$('input[name="ion-input-0"]');
     if (inputDUI) {
-        await inputDUI.type('');
+        await inputDUI.type('036710269');
     } else {
         console.error('No se encontró el primer input');
     }
@@ -22,7 +23,7 @@ const main = async () => {
     // Seleccionar el segundo input por su nombre
     const inputSegundo = await page.$('input[name="ion-input-1"]');
     if (inputSegundo) {
-        await inputSegundo.type('');
+        await inputSegundo.type('Henry@1234');
     } else {
         console.error('No se encontró el segundo input');
     };
@@ -62,22 +63,38 @@ const main = async () => {
 
     const inputInsideDUI = await page.$('.__voters-DUI input');
 
-    const okSelector = '.duiLookup.ok';
-    const errorSelector = '.duiLookup.error';
-    const reasonSelector = '.duiLookup.ok .reason';
-    const reasonErrorSelector = '.duiLookup.error .reason';
-
     let counter = 1;
 
     console.log(`Se van a verificar ${voters.length} votantes`)
 
+    page.setRequestInterception(true);
+
+    page.on('request', async interceptedRequest => {
+        if (interceptedRequest.url().includes('api/addVoter') && interceptedRequest.method() === 'POST') {
+            interceptedRequest.continue();
+        } else {
+            interceptedRequest.continue();
+        }
+    });
+
     for (const voter of voters) {
+
+        await delay(800);
+
+        console.log('\n');
 
         let dui = voter.documento.toString().replace(/-/g, '');
 
         dui = dui.length > 9 ? dui.substring(0, 9) : dui.padStart(9, '0');
         console.log(counter, ' - Verificando el DUI: ', dui);
         counter++;
+
+        await delay(500);
+
+        if (voter.verificado === true) {
+            console.log(`Ya fue verificado`);
+            continue;
+        }
 
         if (!inputInsideDUI) {
             console.error('No se encontró el input dentro del elemento con la clase __voters-DUI');
@@ -88,92 +105,140 @@ const main = async () => {
             clickCount: 3
         }); // Seleccionar el contenido actual del input
 
-        await inputInsideDUI.type(dui); // Ingresar el DUI
+        await inputInsideDUI.type(dui, { delay: 100 }); // Ingresar el DUI
 
-        await delay(3000);
+        // Espera a que se complete la llamada a la API después de ingresar el DUI
+        const response = await waitForApiResponse(page);
 
-        // verificar si se cargo el mensaje de error o el mensaje de ok
-        await page.waitForSelector(`${okSelector}, ${errorSelector}, ${reasonSelector}, ${reasonErrorSelector}`, {
-            visible: true
-        });
+        if (!response) {
+            console.error('No se recibió respuesta de la API');
 
-        const ok = await page.$(okSelector);
-        const error = await page.$(errorSelector);
-        const reason = await page.$(reasonSelector);
-        const reasonError = await page.$(reasonErrorSelector);
-
-        if (reason || reasonError) {
-            const reasonText = await page.evaluate((selector) => {
-                const element = document.querySelector(selector);
-                if (element) {
-                    return element.textContent.trim();
-                }
-                return '';
-            }, reason ? reasonSelector : reasonErrorSelector);
-
-            if (ok) {
-                console.log('El dui es valido, pero: ', reasonText);
-            } else if (error) {
-                console.log('El dui es invalido, porque: ', reasonText);
-            } else {
-                console.error('No se pudo determinar si el DUI es valido o no');
-            }
-
-            console.log('\n')
-
-            await delay(2000);
+            await modifyJsonFile({
+                dui: voter.documento,
+                ok: false,
+                reason: 'No se recibió respuesta de la API'
+            });
 
             continue;
         }
 
-        if (ok) {
-            console.log(`Ingrensando el telefono ${voter.telefono}`);
-            await delay(1000);
+        const responseBody = await response.json();
 
-            const inputTelefono = await page.$('.__voters-telefono input');
+        // Evalúa la respuesta para determinar el estado
+        if (!responseBody.ok) {
+            console.log('El DUI es inválido:', responseBody.reason);
 
-            if (!inputTelefono) {
-                console.error('No se pudo encontrar el input del telefono');
-                break;
-            }
+            await modifyJsonFile({
+                dui: voter.documento,
+                ok: false,
+                reason: responseBody.reason
+            });
 
-            await inputTelefono.click({
-                clickCount: 3
-            }); // Seleccionar el contenido actual del input
+            await delay(800);
+            continue;
+        }
 
-            await inputTelefono.type(voter.telefono.toString());
+        console.log(`Ingrensando el telefono ${voter.telefono}`);
 
-            const button = await page.$("#main-content > div.ion-page.can-go-back > div > div > ion-content > div > div > div.votersContainer > div > div.buttonContainer > ion-button")
+        // formatear el telefono a 8 digitos, si no tiene 8 digitos, seguir al siguiente
+        const telefono = voter.telefono.toString().replace(/-/g, '');
 
-            if (!button) {
-                console.log('No se pudo encontrar el botón para guardar');
-                break
-            }
+        if (telefono.length !== 8) {
+            console.log('El telefono no tiene 8 digitos');
+            await modifyJsonFile({
+                dui: voter.documento,
+                ok: false,
+                reason: 'El telefono no tiene 8 digitos'
+            });
+            continue;
+        }
 
-            button.click();
+        const inputTelefono = await page.$('.__voters-telefono input');
 
-            await delay(3000);
+        if (!inputTelefono) {
+            console.error('No se pudo encontrar el input del telefono');
+            break;
+        }
 
-            const alert = await page.$('ion-alert');
+        await inputTelefono.click({
+            clickCount: 3
+        }); // Seleccionar el contenido actual del input
 
-            if (alert) {
-                console.log('No se pudo agregar, hay una alerta');
-            } else {
-                console.log('Se ingresó el telefono correctamente');
-            }
+        await inputTelefono.type(voter.telefono.toString(), { delay: 100 });
+        await delay(1500);
 
-            console.log('\n');
+        const button = await page.$("#main-content > div.ion-page.can-go-back > div > div > ion-content > div > div > div.votersContainer > div > div.buttonContainer > ion-button")
 
-        } else if (error) {
-            console.log(`No se pudo ingresar el telefono ${voter.telefono} porque el DUI no es valido \n`);
-            await delay(2000);
+        if (!button) {
+            console.log('No se pudo encontrar el botón para guardar');
+            break;
+        }
+
+        button.click();
+
+        const saveResponse = await waitForApiResponse(page);
+
+        if (!saveResponse) {
+            console.error('No se recibió respuesta de la API');
+            break;
+        }
+
+        const saveResponseBody = await saveResponse.json();
+
+        if (saveResponseBody.ok) {
+            console.log('El votante se guardó correctamente');
+
+            await modifyJsonFile({
+                dui: voter.documento,
+                ok: true,
+                reason: ''
+            });
         } else {
-            console.log('No se encontró el mensaje de error o de ok \n');
-            await delay(2000);
+            console.log('El votante no se pudo guardar:', saveResponseBody.reason);
+
+            await modifyJsonFile({
+                dui: voter.documento,
+                ok: false,
+                reason: saveResponseBody.reason
+            });
         }
     }
 };
 
+async function waitForApiResponse(page) {
+    return new Promise(resolve => {
+        const timeout = setTimeout(() => {
+            resolve(null); // Resuelve como nulo después de un tiempo limite
+        }, 5000); // Cambia este valor al tiempo límite que desees
+
+        page.waitForResponse(response => response.url().includes('api/addVoter') && response.status() === 200)
+            .then(response => {
+                clearTimeout(timeout);
+                resolve(response);
+            });
+    });
+}
+
+async function modifyJsonFile(responseBody) {
+    try {
+        const data = await fs.readFile('voters.json', 'utf8');
+        let jsonData = JSON.parse(data);
+
+        const index = jsonData.findIndex(item => item.documento === responseBody.dui);
+
+        if (index !== -1) {
+            jsonData[index].verificado = true;
+            jsonData[index].ok = responseBody.ok;
+            jsonData[index].reason = responseBody.reason;
+
+            await fs.writeFile('voters.json', JSON.stringify(jsonData, null, 2), 'utf8');
+        } else {
+            console.log('Documento no encontrado en el JSON');
+        }
+    } catch (error) {
+        console.error('Error al modificar el archivo JSON:', error);
+    }
+}
 
 const delay = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
 
